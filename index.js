@@ -1,4 +1,4 @@
-// Node.js Web Crypto API Düzeltmesi (crypto is not defined hatası için)
+// Node.js Web Crypto API Düzeltmesi
 const crypto = require('crypto');
 if (!globalThis.crypto) {
     globalThis.crypto = crypto.webcrypto || crypto;
@@ -15,7 +15,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Kalıcı Session Klasör Yolu
 const AUTH_DIR = process.env.RAILWAY_VOLUME ? 
     path.join(process.env.RAILWAY_VOLUME, 'session') : 
     path.join(__dirname, 'session');
@@ -43,7 +42,8 @@ async function startBot() {
             logger: logger,
             connectTimeoutMs: 60000,
             keepAliveIntervalMs: 10000,
-            browser: ["Ubuntu", "Chrome", "20.0.04"]
+            // Pair code doğrulamasının çalışması için resmi tarayıcı tanımı kullanıyoruz
+            browser: ["Mac OS", "Chrome", "121.0.0.0"]
         });
 
         sock.ev.on('connection.update', async (update) => {
@@ -58,17 +58,18 @@ async function startBot() {
             
             if (connection === 'close') {
                 isReady = false;
+                pairingCode = null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 if (statusCode !== DisconnectReason.loggedOut) {
-                    setTimeout(startBot, 5000);
+                    setTimeout(startBot, 3000);
                 }
             }
         });
 
         sock.ev.on('creds.update', saveCreds);
     } catch (e) {
-        console.error('Hata:', e);
-        setTimeout(startBot, 10000);
+        console.error('Bot başlatma hatası:', e);
+        setTimeout(startBot, 5000);
     }
 }
 
@@ -86,20 +87,34 @@ async function loadAllChats() {
     }
 }
 
-// ===================== ROUTES =====================
-
-// Eşleşme Kodu İsteme Endpoint'i
+// Eşleşme Kodu Endpoint'i
 app.post('/request-code', async (req, res) => {
-    const { phoneNumber } = req.body;
+    let { phoneNumber } = req.body;
     if (!phoneNumber) return res.json({ success: false, error: 'Telefon numarası girin!' });
-    if (!sock) return res.json({ success: false, error: 'Sistem hazırlanıyor, tekrar deneyin.' });
+    
+    if (!sock || sock.ws?.readyState !== 1) {
+        return res.json({ success: false, error: 'WhatsApp sunucusu hazırlanıyor, lütfen 3 saniye sonra tekrar deneyin.' });
+    }
 
     try {
-        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+        // Numaradaki tüm harf, alan ve simgeleri temizle
+        let cleanNumber = String(phoneNumber).replace(/\D/g, '');
+        
+        // Başındaki sıfırları kaldır
+        cleanNumber = cleanNumber.replace(/^0+/, '');
+        
+        // Türkiye için başında 90 yoksa ekle
+        if (!cleanNumber.startsWith('90') && cleanNumber.length === 10) {
+            cleanNumber = '90' + cleanNumber;
+        }
+
+        console.log("Kod istenen numara (işlenmiş):", cleanNumber);
+
         const code = await sock.requestPairingCode(cleanNumber);
         pairingCode = code;
         res.json({ success: true, code });
     } catch (err) {
+        console.error("Kod üretme hatası:", err);
         res.json({ success: false, error: err.message || 'Kod alınamadı' });
     }
 });
@@ -194,7 +209,7 @@ app.get('/', (req, res) => {
     <div class="status" id="status">Durum Bekleniyor...</div>
 
     <div style="background:#181818; padding:15px; border-radius:8px; margin-bottom:15px;">
-        <label>Telefon Numarası (Örn: 905xxxxxxxxx):</label>
+        <label>Telefon Numarası:</label>
         <input type="text" id="phoneInput" placeholder="905xxxxxxxxx">
         <button class="btn-gray" onclick="getCode()">🔑 Eşleşme Kodu Al</button>
         <div class="pairing" id="pairingBox">------</div>
@@ -218,6 +233,8 @@ app.get('/', (req, res) => {
         const phone = document.getElementById('phoneInput').value.trim();
         if(!phone) return alert('Lütfen telefon numarası girin!');
         
+        document.getElementById('pairingBox').innerText = 'Kod alınıyor...';
+
         const res = await fetch('/request-code', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -227,6 +244,7 @@ app.get('/', (req, res) => {
         if(d.success) {
             document.getElementById('pairingBox').innerText = d.code;
         } else {
+            document.getElementById('pairingBox').innerText = '------';
             alert('Hata: ' + d.error);
         }
     }
