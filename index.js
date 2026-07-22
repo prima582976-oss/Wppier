@@ -1,3 +1,9 @@
+// Node.js Web Crypto API Düzeltmesi (crypto is not defined hatası için)
+const crypto = require('crypto');
+if (!globalThis.crypto) {
+    globalThis.crypto = crypto.webcrypto || crypto;
+}
+
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -9,6 +15,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+// Kalıcı Session Klasör Yolu
 const AUTH_DIR = process.env.RAILWAY_VOLUME ? 
     path.join(process.env.RAILWAY_VOLUME, 'session') : 
     path.join(__dirname, 'session');
@@ -79,7 +86,9 @@ async function loadAllChats() {
     }
 }
 
-// ROUTE: Eşleşme Kodu Üretme
+// ===================== ROUTES =====================
+
+// Eşleşme Kodu İsteme Endpoint'i
 app.post('/request-code', async (req, res) => {
     const { phoneNumber } = req.body;
     if (!phoneNumber) return res.json({ success: false, error: 'Telefon numarası girin!' });
@@ -101,6 +110,59 @@ app.get('/chats', async (req, res) => {
     if (!isReady) return res.json({ success: false, error: 'Oturum aktif değil' });
     await loadAllChats();
     res.json({ success: true, chats: allChats });
+});
+
+let activeLoopTimeout = null;
+let isLoopRunning = false;
+
+app.post('/start', (req, res) => {
+    const { speed, target, messages } = req.body;
+    if (!isReady || !sock) return res.json({ success: false, error: 'WhatsApp bağlı değil' });
+
+    const messageList = (messages || []).map(m => m.trim()).filter(m => m.length > 0);
+    if (!target || messageList.length === 0) return res.json({ success: false, error: 'Eksik veri' });
+
+    if (activeLoopTimeout) clearTimeout(activeLoopTimeout);
+    isLoopRunning = true;
+
+    let index = 0;
+    const intervalMs = Math.max(Number(speed) || 3000, 1000);
+
+    const sendWithTyping = async () => {
+        if (!isLoopRunning || !sock || !isReady) return;
+
+        const currentMsg = messageList[index % messageList.length];
+        try {
+            await sock.presenceSubscribe(target).catch(() => {});
+            await sock.sendPresenceUpdate('composing', target).catch(() => {});
+
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            await sock.sendMessage(target, { text: currentMsg });
+
+            await sock.sendPresenceUpdate('paused', target).catch(() => {});
+
+            index++;
+        } catch (err) {
+            console.error('Mesaj gönderim hatası:', err.message);
+        }
+
+        if (isLoopRunning) {
+            activeLoopTimeout = setTimeout(sendWithTyping, intervalMs);
+        }
+    };
+
+    sendWithTyping();
+    res.json({ success: true });
+});
+
+app.post('/stop', (req, res) => {
+    isLoopRunning = false;
+    if (activeLoopTimeout) {
+        clearTimeout(activeLoopTimeout);
+        activeLoopTimeout = null;
+    }
+    res.json({ success: true });
 });
 
 app.get('/', (req, res) => {
@@ -178,6 +240,32 @@ app.get('/', (req, res) => {
                 document.getElementById('pairingBox').innerText = 'BAĞLANDI';
             }
         } catch(e) {}
+    }
+
+    async function startSending() {
+        const speed = parseInt(document.getElementById('speed').value);
+        const target = document.getElementById('target').value.trim();
+        const messages = document.getElementById('messages').value.split('\\n').filter(m => m.trim());
+
+        if (!target || messages.length === 0) return alert('Lütfen tüm alanları doldurun!');
+
+        const res = await fetch('/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({speed, target, messages})
+        });
+
+        const data = await res.json();
+        if (data.success) {
+            alert('Gönderim başlatıldı!');
+        } else {
+            alert('Hata: ' + data.error);
+        }
+    }
+
+    async function stopSending() {
+        await fetch('/stop', {method: 'POST'});
+        alert('Gönderim durduruldu.');
     }
 
     setInterval(updateUI, 3000);
