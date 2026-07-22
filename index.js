@@ -25,12 +25,16 @@ if (!fs.existsSync(AUTH_DIR)) {
 
 let sock = null;
 let isReady = false;
+let isConnecting = false;
 let pairingCode = null;
 let allChats = [];
 
 const logger = pino({ level: 'silent' });
 
 async function startBot() {
+    if (isConnecting) return;
+    isConnecting = true;
+
     try {
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
         const { version } = await fetchLatestBaileysVersion();
@@ -42,15 +46,19 @@ async function startBot() {
             logger: logger,
             connectTimeoutMs: 60000,
             keepAliveIntervalMs: 10000,
-            // Pair code doğrulamasının çalışması için resmi tarayıcı tanımı kullanıyoruz
-            browser: ["Mac OS", "Chrome", "121.0.0.0"]
+            browser: ["Ubuntu", "Chrome", "20.0.04"]
         });
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
             
+            if (connection === 'connecting') {
+                console.log('🔄 WhatsApp sunucusuna bağlanılıyor...');
+            }
+
             if (connection === 'open') {
                 isReady = true;
+                isConnecting = false;
                 pairingCode = null;
                 console.log('✅ BAĞLANTI BAŞARILI - Kalıcı oturum aktif');
                 await loadAllChats();
@@ -58,16 +66,22 @@ async function startBot() {
             
             if (connection === 'close') {
                 isReady = false;
+                isConnecting = false;
                 pairingCode = null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
+                console.log('⚠️ Bağlantı koptu. Durum Kodu:', statusCode);
+                
                 if (statusCode !== DisconnectReason.loggedOut) {
                     setTimeout(startBot, 3000);
+                } else {
+                    console.log('Otomatik oturum kapatıldı, session klasörünü temizleyin.');
                 }
             }
         });
 
         sock.ev.on('creds.update', saveCreds);
     } catch (e) {
+        isConnecting = false;
         console.error('Bot başlatma hatası:', e);
         setTimeout(startBot, 5000);
     }
@@ -92,8 +106,8 @@ app.post('/request-code', async (req, res) => {
     let { phoneNumber } = req.body;
     if (!phoneNumber) return res.json({ success: false, error: 'Telefon numarası girin!' });
     
-    if (!sock || sock.ws?.readyState !== 1) {
-        return res.json({ success: false, error: 'WhatsApp sunucusu hazırlanıyor, lütfen 3 saniye sonra tekrar deneyin.' });
+    if (!sock) {
+        return res.json({ success: false, error: 'Sistem henüz başlatılmadı. 5 saniye bekleyip tekrar deneyin.' });
     }
 
     try {
@@ -103,19 +117,19 @@ app.post('/request-code', async (req, res) => {
         // Başındaki sıfırları kaldır
         cleanNumber = cleanNumber.replace(/^0+/, '');
         
-        // Türkiye için başında 90 yoksa ekle
+        // Türkiye için başında 90 yoksa ekle (10 haneli girildiyse)
         if (!cleanNumber.startsWith('90') && cleanNumber.length === 10) {
             cleanNumber = '90' + cleanNumber;
         }
 
-        console.log("Kod istenen numara (işlenmiş):", cleanNumber);
+        console.log("Kod istenen numara:", cleanNumber);
 
         const code = await sock.requestPairingCode(cleanNumber);
         pairingCode = code;
         res.json({ success: true, code });
     } catch (err) {
         console.error("Kod üretme hatası:", err);
-        res.json({ success: false, error: err.message || 'Kod alınamadı' });
+        res.json({ success: false, error: err.message || 'Kod alınamadı. Sunucu bağlanırken hata oluştu.' });
     }
 });
 
