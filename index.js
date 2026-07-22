@@ -1,4 +1,3 @@
-// Node.js Web Crypto API Düzeltmesi
 const crypto = require('crypto');
 if (!globalThis.crypto) {
     globalThis.crypto = crypto.webcrypto || crypto;
@@ -19,6 +18,14 @@ const AUTH_DIR = process.env.RAILWAY_VOLUME ?
     path.join(process.env.RAILWAY_VOLUME, 'session') : 
     path.join(__dirname, 'session');
 
+function clearSession() {
+    if (fs.existsSync(AUTH_DIR)) {
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        console.log('🧹 Session klasörü temizlendi.');
+    }
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+}
+
 if (!fs.existsSync(AUTH_DIR)) {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
 }
@@ -37,7 +44,9 @@ async function startBot() {
 
     try {
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-        const { version } = await fetchLatestBaileysVersion();
+        // WhatsApp Web'in EN GÜNCEL versiyonunu dinamik olarak alıyoruz
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        console.log(`📡 WhatsApp Web Sürümü: v${version.join('.')}` + (isLatest ? ' (En Güncel)' : ''));
 
         sock = makeWASocket({
             version,
@@ -45,7 +54,8 @@ async function startBot() {
             printQRInTerminal: false,
             logger: logger,
             connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 10000,
+            keepAliveIntervalMs: 15000,
+            // Pair code kabulü için en stabil resmi tarayıcı tanımı
             browser: ["Ubuntu", "Chrome", "20.0.04"]
         });
 
@@ -69,12 +79,14 @@ async function startBot() {
                 isConnecting = false;
                 pairingCode = null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                console.log('⚠️ Bağlantı koptu. Durum Kodu:', statusCode);
+                console.log('⚠️ Bağlantı koptu. Hata Kodu:', statusCode);
                 
                 if (statusCode !== DisconnectReason.loggedOut) {
                     setTimeout(startBot, 3000);
                 } else {
-                    console.log('Otomatik oturum kapatıldı, session klasörünü temizleyin.');
+                    console.log('❌ Oturum kapatıldı, temizleniyor...');
+                    clearSession();
+                    setTimeout(startBot, 3000);
                 }
             }
         });
@@ -101,35 +113,47 @@ async function loadAllChats() {
     }
 }
 
-// Eşleşme Kodu Endpoint'i
+// ROUTE: Eşleşme Kodu
 app.post('/request-code', async (req, res) => {
     let { phoneNumber } = req.body;
     if (!phoneNumber) return res.json({ success: false, error: 'Telefon numarası girin!' });
     
     if (!sock) {
-        return res.json({ success: false, error: 'Sistem henüz başlatılmadı. 5 saniye bekleyip tekrar deneyin.' });
+        return res.json({ success: false, error: 'WhatsApp servisi henüz başlamadı.' });
     }
 
     try {
-        // Numaradaki tüm harf, alan ve simgeleri temizle
-        let cleanNumber = String(phoneNumber).replace(/\D/g, '');
-        
-        // Başındaki sıfırları kaldır
-        cleanNumber = cleanNumber.replace(/^0+/, '');
-        
-        // Türkiye için başında 90 yoksa ekle (10 haneli girildiyse)
+        let cleanNumber = String(phoneNumber).replace(/\D/g, '').replace(/^0+/, '');
         if (!cleanNumber.startsWith('90') && cleanNumber.length === 10) {
             cleanNumber = '90' + cleanNumber;
         }
 
-        console.log("Kod istenen numara:", cleanNumber);
+        console.log("👉 Kod İstenen Numara:", cleanNumber);
 
+        // Kod üretme isteği
         const code = await sock.requestPairingCode(cleanNumber);
         pairingCode = code;
         res.json({ success: true, code });
     } catch (err) {
-        console.error("Kod üretme hatası:", err);
-        res.json({ success: false, error: err.message || 'Kod alınamadı. Sunucu bağlanırken hata oluştu.' });
+        console.error("❌ Kod üretme hatası:", err);
+        res.json({ success: false, error: 'Kod alınamadı: ' + (err.message || 'Bilinmeyen hata') });
+    }
+});
+
+// ROUTE: Oturumu/Session'ı Sıfırla
+app.post('/reset-session', (req, res) => {
+    try {
+        if (sock) {
+            try { sock.logout(); } catch(e){}
+            try { sock.end(); } catch(e){}
+        }
+        clearSession();
+        isReady = false;
+        isConnecting = false;
+        setTimeout(startBot, 2000);
+        res.json({ success: true, message: 'Oturum sıfırlandı, yeniden başlatılıyor...' });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
     }
 });
 
@@ -213,6 +237,7 @@ app.get('/', (req, res) => {
         .btn-green { background:#25D366; color:black; }
         .btn-red { background:#e53e3e; color:white; }
         .btn-gray { background:#333; color:white; }
+        .btn-orange { background:#d69e2e; color:black; }
         input, textarea { width:100%; padding:10px; background:#1a1a1a; border:1px solid #333; color:#fff; border-radius:6px; margin-bottom:10px; }
         label { font-size:13px; color:#aaa; margin-bottom:4px; display:block; }
     </style>
@@ -227,6 +252,7 @@ app.get('/', (req, res) => {
         <input type="text" id="phoneInput" placeholder="905xxxxxxxxx">
         <button class="btn-gray" onclick="getCode()">🔑 Eşleşme Kodu Al</button>
         <div class="pairing" id="pairingBox">------</div>
+        <button class="btn-orange" onclick="resetSession()">🔄 Bağlantıyı Sıfırla / Baştan Başlat</button>
     </div>
 
     <label>Gönderim Hızı (ms):</label>
@@ -247,7 +273,7 @@ app.get('/', (req, res) => {
         const phone = document.getElementById('phoneInput').value.trim();
         if(!phone) return alert('Lütfen telefon numarası girin!');
         
-        document.getElementById('pairingBox').innerText = 'Kod alınıyor...';
+        document.getElementById('pairingBox').innerText = 'KOD ÜRETİLİYOR...';
 
         const res = await fetch('/request-code', {
             method: 'POST',
@@ -261,6 +287,14 @@ app.get('/', (req, res) => {
             document.getElementById('pairingBox').innerText = '------';
             alert('Hata: ' + d.error);
         }
+    }
+
+    async function resetSession() {
+        if(!confirm('Bağlantı verileri temizlenip baştan başlatılacak. Onaylıyor musunuz?')) return;
+        document.getElementById('pairingBox').innerText = 'SIFIRLANIYOR...';
+        const res = await fetch('/reset-session', { method: 'POST' });
+        const d = await res.json();
+        alert(d.message || d.error);
     }
 
     async function updateUI() {
